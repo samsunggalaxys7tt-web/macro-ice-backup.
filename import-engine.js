@@ -14971,13 +14971,19 @@ function diBrokerGroups(feeds,broker,universe,now,includeContext=false){
   return contracts;
 }
 
+// Batch 65: the normal weekend closure (Friday close to Sunday open) is not a data gap. Holiday and missing-bar gaps still fail.
+function ice65Marker(){return 1;}
+function diWeekendClose(iso){const t=Date.parse(iso);if(!Number.isFinite(t))return false;const d=new Date(t),w=d.getUTCDay(),h=d.getUTCHours();return w===6||(w===0&&h<23)||(w===5&&h>=20);}
 function diBrokerMove(group,frame,now){
   if(!group)return {ok:false,reason:'Broker contract unavailable'};
-  const r=frame==='1H'?hourDirection(group.bars,now):intradayDirection(group.bars,Number(frame.slice(0,-1)),now);
+  let r=frame==='1H'?hourDirection(group.bars,now):intradayDirection(group.bars,Number(frame.slice(0,-1)),now);
+  // A window that starts inside the weekend closure is measured from the weekly open (stated in observedFrom), never padded or guessed.
+  if(!r.ok&&r.gap&&r.gap.position==='Start endpoint'&&diWeekendClose(r.gap.close)){const p=intradayDirection(group.bars,Number(frame.slice(0,-1)),now,true,true);if(p.ok&&p.observedFrom&&Array.isArray(p.missingCloses)&&p.missingCloses.length===0)r=p;}
   if(!r.ok)return {ok:false,reason:r.reason,to:r.bar?.endUTC||null,retrievedAt:r.bar?.retrievedUTC||null,...(r.gap?{gap:r.gap}:{})};
   const bar=r.bar;
   return {ok:true,value:r.value,direction:r.direction,from:bar?.openUTC||r.from,to:bar?.endUTC||r.to,
-    start:bar?.open??r.start,end:bar?.close??r.end,observations:r.observations??1,retrievedAt:bar?.retrievedUTC||r.retrievedUTC};
+    start:bar?.open??r.start,end:bar?.close??r.end,observations:r.observations??1,retrievedAt:bar?.retrievedUTC||r.retrievedUTC,
+    ...(r.observedFrom?{observedFrom:r.observedFrom,observedHours:r.observedHours,note:'Measured from the weekly open because the window starts in the weekend closure'}:{})};
 }
 
 function diBrokerWeek(group,broker,now){
@@ -15047,7 +15053,7 @@ function diStructure(group,frame,now,broker){
   if(sample.length!==21||sample.some((r,i)=>{
     if(!i)return false;
     const previous=Date.parse(sample[i-1].endUTC),gap=Date.parse(r.openUTC)-previous;
-    const weekend=daily&&gap>=47*DI_HOUR&&gap<=49*DI_HOUR&&new Date(previous+DI_DAY).getUTCDay()===6;
+    const weekend=(daily&&gap>=47*DI_HOUR&&gap<=49*DI_HOUR&&new Date(previous+DI_DAY).getUTCDay()===6)||(gap>=40*DI_HOUR&&gap<=56*DI_HOUR&&diWeekendClose(sample[i-1].endUTC));
     return gap!==0&&!weekend;
   }))return {...provenance,ok:false,reason:'Complete consecutive native '+frame+' structure unavailable',...seen};
   if(daily){
