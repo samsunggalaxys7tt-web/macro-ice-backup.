@@ -38,7 +38,7 @@ jobs:
           echo "cloud copy" > alerts/run/alerts-no-popup.txt
           echo "cloud copy" > alerts/run/alerts-no-calibration.txt
           cd alerts/run && node alerts.mjs
-            - name: Phone test (manual runs only)
+        - name: Phone test (manual runs only)
         if: github.event_name == 'workflow_dispatch'
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
