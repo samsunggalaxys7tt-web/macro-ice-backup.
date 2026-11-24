@@ -1,0 +1,44 @@
+name: Macro ICE cloud alerts
+on:
+  schedule:
+    - cron: '*/20 0-22 * * 1-5'
+    - cron: '*/20 21-23 * * 0'
+  workflow_dispatch:
+concurrency:
+  group: macro-ice-alerts
+  cancel-in-progress: false
+jobs:
+  alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Restore last state
+        uses: actions/cache/restore@v4
+        with:
+          path: alerts/run
+          key: alerts-state-never-matches
+          restore-keys: alerts-state-
+      - name: Run alerts
+        env:
+          ALERTS_CLOUD: '1'
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          mkdir -p alerts/run
+          cp alerts/alerts.mjs alerts/calibration.mjs alerts/run/
+          [ -f alerts/positions-lib.mjs ] && cp alerts/positions-lib.mjs alerts/run/ || true
+          printf '%s\n' "$NTFY_TOPIC" > alerts/run/ntfy-topic.txt
+          echo "cloud copy" > alerts/run/alerts-no-popup.txt
+          echo "cloud copy" > alerts/run/alerts-no-calibration.txt
+          cd alerts/run && node alerts.mjs
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            alerts/run/alerts-state.json
+            alerts/run/logs
+          key: alerts-state-${{ github.run_id }}
