@@ -14995,6 +14995,7 @@ function ice79Marker(){return 1;}
 function ice80Marker(){return 1;}
 function ice81Marker(){return 1;}
 function ice82Marker(){return 1;}
+function ice83Marker(){return 1;}
 function diWeekendClose(iso){const t=Date.parse(iso);if(!Number.isFinite(t))return false;const d=new Date(t),w=d.getUTCDay(),h=d.getUTCHours();return w===6||(w===0&&h<23)||(w===5&&h>=20);}
 function diBrokerMove(group,frame,now){
   if(!group)return {ok:false,reason:'Broker contract unavailable'};
@@ -15548,8 +15549,9 @@ function mqlSurveys(store,nowMs){
   const mine=ev.filter(e=>e.ccy===ccy);
   for(const name of [...new Set(mine.map(e=>e.name))].sort()){
    const same=mine.filter(e=>e.name===name);
-   const r=same.filter(e=>e.actual!==null&&e.actual!==undefined).sort((x,y)=>y.timeUtc.localeCompare(x.timeUtc))[0];if(!r)continue;
+   const r=same.filter(e=>e.actual!==null&&e.actual!==undefined).sort((x,y)=>y.timeUtc.localeCompare(x.timeUtc))[0];
    const nx=same.filter(e=>(e.actual===null||e.actual===undefined)&&Date.parse(e.timeUtc)>nowMs-3600000).sort((x,y)=>x.timeUtc.localeCompare(y.timeUtc))[0]||null;
+   if(!r){if(nx&&nx.previous!==null&&nx.previous!==undefined)out.push({ccy,name:nx.name,releaseType:'final',actual:nx.previous,previous:null,revisedPrevious:null,forecast:null,releaseUtc:null,releaseTt:'before the feed window',retrievedAt:nx.firstSeenAt,revised:false,ageDays:null,status:'last reading (from next release)',next:{name:nx.name,releaseUtc:nx.timeUtc,releaseTt:mfgTt(nx.timeUtc),forecast:nx.forecast}});continue;}
    const age=Math.floor((nowMs-Date.parse(r.timeUtc))/86400000);
    out.push({ccy,name:r.name,releaseType:mqlType(r.name,r.timeUtc),actual:r.actual,previous:r.previous,revisedPrevious:r.revisedPrevious,forecast:r.forecast,releaseUtc:r.timeUtc,releaseTt:mfgTt(r.timeUtc),retrievedAt:r.firstSeenAt,revised:(r.actualRevisions||[]).length>0,ageDays:age,status:age>45?'stale':'current',next:nx?{name:nx.name,releaseUtc:nx.timeUtc,releaseTt:mfgTt(nx.timeUtc),forecast:nx.forecast}:null});
   }
