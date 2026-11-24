@@ -27,9 +27,13 @@ jobs:
           ALERTS_CLOUD: '1'
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          mkdir -p alerts/run
-          cp alerts/alerts.mjs alerts/calibration.mjs alerts/run/
-          [ -f alerts/positions-lib.mjs ] && cp alerts/positions-lib.mjs alerts/run/ || true
+                    mkdir -p alerts/run
+          for f in alerts.mjs calibration.mjs positions-lib.mjs; do
+            src=$(find . -path ./alerts/run -prune -o -name "$f" -type f -print | head -n 1)
+            if [ -n "$src" ]; then cp "$src" alerts/run/; else echo "missing $f"; fi
+          done
+          ls alerts/run
+          [ -f alerts/run/alerts.mjs ] || { echo "alerts.mjs was not uploaded to the repo"; exit 1; }
           printf '%s\n' "$NTFY_TOPIC" > alerts/run/ntfy-topic.txt
           echo "cloud copy" > alerts/run/alerts-no-popup.txt
           echo "cloud copy" > alerts/run/alerts-no-calibration.txt
