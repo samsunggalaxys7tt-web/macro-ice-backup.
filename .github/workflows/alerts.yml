@@ -27,7 +27,7 @@ jobs:
           ALERTS_CLOUD: '1'
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-                    mkdir -p alerts/run
+          mkdir -p alerts/run
           for f in alerts.mjs calibration.mjs positions-lib.mjs; do
             src=$(find . -path ./alerts/run -prune -o -name "$f" -type f -print | head -n 1)
             if [ -n "$src" ]; then cp "$src" alerts/run/; else echo "missing $f"; fi
