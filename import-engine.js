@@ -14994,6 +14994,7 @@ function ice78Marker(){return 1;}
 function ice79Marker(){return 1;}
 function ice80Marker(){return 1;}
 function ice81Marker(){return 1;}
+function ice82Marker(){return 1;}
 function diWeekendClose(iso){const t=Date.parse(iso);if(!Number.isFinite(t))return false;const d=new Date(t),w=d.getUTCDay(),h=d.getUTCHours();return w===6||(w===0&&h<23)||(w===5&&h>=20);}
 function diBrokerMove(group,frame,now){
   if(!group)return {ok:false,reason:'Broker contract unavailable'};
@@ -15498,7 +15499,8 @@ async function manufacturingBaseApi(request,env){
 // Batch 81: MT5 economic calendar feed. The PC sends manufacturing PMI and industrial production events read from the broker terminals' MQL5 calendar. Evidence only.
 const MQL_PATH='/api/ice/mql5-calendar',MQL_KEY='ice/mql5-calendar.json',MQL_CCY=new Set(['USD','EUR','GBP','JPY','CHF','CAD','AUD','NZD','NOK','SEK']);
 const mqlIsMfg=n=>{const s=String(n||'').toLowerCase();return !/non-manufacturing|services|composite|construction|retail/.test(s)&&/manufactur|industrial production|factory|\bpmi\b/.test(s);};
-const mqlType=n=>/flash|prelim/i.test(String(n))?'preliminary':'final';
+const mqlType=(n,t)=>{const s=String(n||'');if(/flash|prelim/i.test(s))return 'preliminary';if(/s&p global|hcob|jibun/i.test(s)&&/pmi/i.test(s)&&t&&Number(String(t).slice(8,10))>=15)return 'preliminary';return 'final';};
+const mqlPmi=n=>{const s=String(n||'');return (/manufacturing pmi/i.test(s)&&!/prices|employment|new orders|backlog|inventor|output|export|import/i.test(s))||/^(businessnz|ai group) manufacturing index$/i.test(s);};
 const mqlNum=v=>v===null||v===undefined?null:(typeof v==='number'&&Number.isFinite(v)?v:undefined);
 function mqlClean(body){
  if(!body||!Array.isArray(body.events)||body.events.length>800)throw Error('Unexpected calendar layout');
@@ -15516,7 +15518,7 @@ function mqlMerge(stored,incoming,nowIso,meta){
  const map=new Map((stored&&stored.events||[]).map(e=>[e.id,e])),changes=[];
  for(const e of incoming){
   const old=map.get(e.id);
-  if(!old){map.set(e.id,{...e,releaseType:mqlType(e.name),firstSeenAt:nowIso,lastSeenAt:nowIso,actualFirst:e.actual===null?null:{value:e.actual,at:nowIso},actualRevisions:[]});changes.push({id:e.id,change:'new'});continue;}
+  if(!old){map.set(e.id,{...e,releaseType:mqlType(e.name,e.timeUtc),firstSeenAt:nowIso,lastSeenAt:nowIso,actualFirst:e.actual===null?null:{value:e.actual,at:nowIso},actualRevisions:[]});changes.push({id:e.id,change:'new'});continue;}
   const n={...old,lastSeenAt:nowIso,forecast:e.forecast!==null?e.forecast:old.forecast,previous:e.previous!==null?e.previous:old.previous,revisedPrevious:e.revisedPrevious!==null?e.revisedPrevious:old.revisedPrevious,importance:e.importance,impact:e.impact!==null?e.impact:old.impact,revision:Math.max(old.revision||0,e.revision||0)};
   if(e.actual!==null){
    if(old.actual===null||old.actual===undefined){n.actual=e.actual;n.actualFirst={value:e.actual,at:nowIso};changes.push({id:e.id,change:'released'});}
@@ -15541,15 +15543,15 @@ async function mql5CalendarApi(request,env){
  return Response.json({ok:true,received:inc.length,stored:m.store.events.length,changes:m.changes},{headers});
 }
 function mqlSurveys(store,nowMs){
- const ev=(store&&store.events)||[],out=[];
- for(const ccy of MQL_CCY){
-  const mine=ev.filter(e=>e.ccy===ccy);if(!mine.length)continue;
-  const rel=mine.filter(e=>e.actual!==null&&e.actual!==undefined).sort((a,b)=>b.timeUtc.localeCompare(a.timeUtc));
-  const nxt=mine.filter(e=>(e.actual===null||e.actual===undefined)&&Date.parse(e.timeUtc)>nowMs-3600000).sort((a,b)=>a.timeUtc.localeCompare(b.timeUtc))[0]||null;
-  for(const type of ['final','preliminary']){
-   const r=rel.find(e=>e.releaseType===type);if(!r)continue;
+ const ev=((store&&store.events)||[]).filter(e=>mqlPmi(e.name)),out=[],order=[...MQL_CCY];
+ for(const ccy of order){
+  const mine=ev.filter(e=>e.ccy===ccy);
+  for(const name of [...new Set(mine.map(e=>e.name))].sort()){
+   const same=mine.filter(e=>e.name===name);
+   const r=same.filter(e=>e.actual!==null&&e.actual!==undefined).sort((x,y)=>y.timeUtc.localeCompare(x.timeUtc))[0];if(!r)continue;
+   const nx=same.filter(e=>(e.actual===null||e.actual===undefined)&&Date.parse(e.timeUtc)>nowMs-3600000).sort((x,y)=>x.timeUtc.localeCompare(y.timeUtc))[0]||null;
    const age=Math.floor((nowMs-Date.parse(r.timeUtc))/86400000);
-   out.push({ccy,name:r.name,releaseType:type,actual:r.actual,previous:r.previous,revisedPrevious:r.revisedPrevious,forecast:r.forecast,releaseUtc:r.timeUtc,releaseTt:mfgTt(r.timeUtc),retrievedAt:r.firstSeenAt,revised:(r.actualRevisions||[]).length>0,ageDays:age,status:age>45?'stale':'current',next:nxt&&nxt.releaseType===type?{name:nxt.name,releaseUtc:nxt.timeUtc,releaseTt:mfgTt(nxt.timeUtc),forecast:nxt.forecast}:null});
+   out.push({ccy,name:r.name,releaseType:mqlType(r.name,r.timeUtc),actual:r.actual,previous:r.previous,revisedPrevious:r.revisedPrevious,forecast:r.forecast,releaseUtc:r.timeUtc,releaseTt:mfgTt(r.timeUtc),retrievedAt:r.firstSeenAt,revised:(r.actualRevisions||[]).length>0,ageDays:age,status:age>45?'stale':'current',next:nx?{name:nx.name,releaseUtc:nx.timeUtc,releaseTt:mfgTt(nx.timeUtc),forecast:nx.forecast}:null});
   }
  }
  return out;
