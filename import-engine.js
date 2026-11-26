@@ -13856,6 +13856,9 @@ async function iceApi(request,env){const url=new URL(request.url);try{
  if(url.pathname==='/api/ice/storage')return storageApi(request,env);
  if(url.pathname==='/api/ice/manufacturing')return manufacturingApi(request,env);
  if(url.pathname===MQL_PATH)return mql5CalendarApi(request,env);
+ if(url.pathname===METI_PATH)return metiIipApi(request,env);
+ if(url.pathname===JPE_PATH)return japanEstatApi(request,env);
+ if(url.pathname===BFS_PATH)return bfsIpiApi(request,env);
  if(url.pathname==='/api/ice/storage-prune')return storagePruneApi(request,env);
  if(url.pathname==='/api/ice/batch3')return batch3Api(request,env);
  if(url.pathname==='/api/ice/batch2b')return batch2bApi(request,env);
@@ -15036,6 +15039,119 @@ function ice83Marker(){return 1;}
 function ice84Marker(){return 1;}
 function ice85Marker(){return 1;}
 function ice86Marker(){return 1;}
+function ice87Marker(){return 1;}
+function ice88Marker(){return 1;}
+function ice89Marker(){return 1;}
+const BFS_PATH='/api/ice/bfs-ipi',BFS_KEY='ice/manual/bfs-ipi.xlsx';
+async function mfgParseBfsXlsx(buf){
+ const get=await mfgZipRead(buf),ssx=await get('xl/sharedStrings.xml'),sx=await get('xl/worksheets/sheet1.xml');
+ if(!ssx||!sx)throw Error('FSO workbook layout changed');
+ const ss=[...ssx.matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m=>[...m[1].matchAll(/<t[^>]*>([^<]*)<\/t>/g)].map(x=>x[1]).join(''));
+ const rows={};
+ for(const m of sx.matchAll(/<c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)){const v=(m[4]||'').match(/<v>([^<]*)<\/v>/);if(!v)continue;(rows[m[2]]=rows[m[2]]||{})[m[1]]=/t="s"/.test(m[3])?ss[Number(v[1])]:v[1];}
+ const title=String((rows['1']||{}).A||'');
+ if(!/monthly/i.test(title)||!/industry/i.test(title)||!/seasonally adjusted/i.test(title))throw Error('FSO sheet is not the monthly seasonally adjusted industry index');
+ if(!/2021\s*=\s*100/.test(String((rows['2']||{}).A||'')))throw Error('FSO base year changed');
+ const head=Object.values(rows).find(r=>Object.values(r).filter(x=>/^\d{2}\.\d{4}$/.test(String(x))).length>=12),man=Object.values(rows).find(r=>r.C==='Manufacturing'&&r.A==='C');
+ if(!head||!man)throw Error('FSO manufacturing row not found');
+ const pts=Object.keys(head).flatMap(c=>{const m=/^(\d{2})\.(\d{4})$/.exec(String(head[c])),v=Number(man[c]);return m&&man[c]!=null&&man[c]!==''&&Number.isFinite(v)?[{d:m[2]+'-'+m[1]+'-01',v}]:[];}).sort((a,b)=>a.d.localeCompare(b.d));
+ return{points:pts,title:'Switzerland manufacturing production index (2021=100, SA)',release:null};
+}
+async function bfsIpiApi(request,env){
+ const headers={'Cache-Control':'no-store'};
+ if(!env.BUCKET)return Response.json({error:'Saved evidence unavailable'},{status:503,headers});
+ let prior=null;try{prior=await env.BUCKET.get(BFS_KEY);}catch{prior=null;}
+ const pm=(prior&&prior.customMetadata)||{};
+ if(request.method==='GET')return Response.json({stored:!!prior,period:pm.period||null,uploadedAt:pm.uploadedAt||null},{headers});
+ if(request.method!=='POST')return Response.json({error:'Use GET or POST'},{status:405,headers});
+ let buf;try{buf=await request.arrayBuffer();}catch{return Response.json({error:'Could not read the file'},{status:400,headers});}
+ if(buf.byteLength<500||buf.byteLength>1500000||new Uint8Array(buf)[0]!==0x50||new Uint8Array(buf)[1]!==0x4b)return Response.json({error:'Not an FSO Excel file'},{status:400,headers});
+ let pts;try{pts=(await mfgParseBfsXlsx(buf)).points;}catch(e){return Response.json({error:String(e&&e.message||e).slice(0,120)},{status:422,headers});}
+ const last=pts[pts.length-1];
+ if(pts.length<24||!last||!(last.v>30&&last.v<300))return Response.json({error:'FSO file failed validation'},{status:422,headers});
+ if(pm.period&&pm.period>last.d)return Response.json({error:'Older than the saved copy ('+pm.period+')'},{status:409,headers});
+ const uploadedAt=new Date().toISOString();
+ try{await env.BUCKET.put(BFS_KEY,buf,{httpMetadata:{contentType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},customMetadata:{uploadedAt,period:last.d}});}catch{return Response.json({error:'Could not save the file'},{status:500,headers});}
+ try{await mfgBuild(env);}catch{/* the scheduled run will pick it up */}
+ return Response.json({ok:true,points:pts.length,period:last.d,value:last.v,changed:pm.period!==last.d},{headers});
+}
+const JPE_PATH='/api/ice/japan-estat',JPE_KEY='ice/japan-estat.json';
+const JPE_DEF={
+ CPI_00M:{PCPI_IX:['cpi','Consumer prices, all items (2020=100)','M','index',50,250,0]},
+ IND_00M:{AIP_SA_IX:['iip','Industrial production (2020=100)','M','index',40,250,1]},
+ PPI_00M:{PPPIG_IX:['cgpi','Corporate goods prices (2020=100)','M','index',50,300,0],PPPIS_IX:['sppi','Services producer prices (2020=100)','M','index',50,300,0]},
+ WOE_00M:{LCEAI_M_IX:['earn','Earnings index (2020=100)','M','index',30,300,0]},
+ EMP_00M:{LE_PE_NUM:['emp','Employed persons','M','persons',3e7,9e7,0]},
+ UEM_00M:{LU_PE_NUM:['unemp','Unemployed persons','M','persons',5e5,6e6,0]},
+ MET_00M:{TXG_FOB_XDC:['exp','Merchandise exports (FOB)','M','JPY',1e12,3e13,0],TMG_CIF_XDC:['imp','Merchandise imports (CIF)','M','JPY',1e12,3e13,0]},
+ NAG_00Q:{NGDP_R_XDC:['gdp_r','GDP, real (2020 prices)','Q','JPY',2e13,4e14,0],NCPH_R_XDC:['cons_r','Household consumption, real','Q','JPY',1e13,3e14,0],NFI_R_XDC:['inv_r','Fixed investment, real','Q','JPY',5e12,2e14,0],NX_R_XDC:['x_r','Exports, real','Q','JPY',5e12,2e14,0],NM_R_XDC:['m_r','Imports, real','Q','JPY',5e12,2e14,0],NGDP_XDC:['gdp_n','GDP, nominal','Q','JPY',2e13,5e14,0]}
+};
+function jpeParse(name,xml){
+ const def=JPE_DEF[name];if(!def||typeof xml!=='string'||xml.length>200000)throw Error('Unexpected e-Stat file: '+name);
+ const out=[];
+ for(const m of xml.matchAll(/<Series\b([^>]*)>([\s\S]*?)<\/Series>/g)){
+  const a={};for(const x of m[1].matchAll(/(\w+)="([^"]*)"/g))a[x[1]]=x[2];
+  const d=def[a.INDICATOR];if(!d||a.REF_AREA!=='JP')continue;
+  const mult=Number(a.UNIT_MULT||0);if(!Number.isFinite(mult)||mult<0||mult>12)throw Error('Bad unit multiplier: '+a.INDICATOR);
+  const pts=[];for(const o of m[2].matchAll(/<Obs\b([^>]*?)\/?>/g)){const b={};for(const x of o[1].matchAll(/(\w+)="([^"]*)"/g))b[x[1]]=x[2];
+   const okp=d[2]==='M'?/^\d{4}-\d{2}$/.test(b.TIME_PERIOD||''):/^\d{4}-Q[1-4]$/.test(b.TIME_PERIOD||'');const v=Number(b.OBS_VALUE);
+   if(okp&&b.OBS_VALUE!==''&&Number.isFinite(v))pts.push([b.TIME_PERIOD,v*Math.pow(10,mult),b.OBS_STATUS||'']);}
+  pts.sort((p,q)=>p[0].localeCompare(q[0]));
+  if(pts.length<(d[2]==='M'?13:5))throw Error('Too few observations: '+a.INDICATOR);
+  const last=pts[pts.length-1][1];if(!(last>=d[4]&&last<=d[5]))throw Error('Value out of range: '+a.INDICATOR);
+  out.push({id:d[0],code:a.INDICATOR,label:d[1],freq:d[2],unit:d[3],base:a.BASE_PER&&a.BASE_PER!=='_Z'?a.BASE_PER:null,sa:d[6]===1,file:name,points:pts.slice(-48)});
+ }
+ if(!out.length)throw Error('No expected series in '+name);return out;
+}
+async function japanEstatApi(request,env){
+ const headers={'Cache-Control':'no-store'};
+ if(!env.BUCKET)return Response.json({error:'Saved evidence unavailable'},{status:503,headers});
+ let stored=null;try{const o=await env.BUCKET.get(JPE_KEY);if(o)stored=await o.json();}catch{stored=null;}
+ if(request.method==='GET')return Response.json(jpeView(stored,Date.now()),{headers});
+ if(request.method!=='POST')return Response.json({error:'Use GET or POST'},{status:405,headers});
+ let body;try{const t=await request.text();if(t.length>400000)throw Error('too large');body=JSON.parse(t);}catch{return Response.json({error:'Body is not valid JSON'},{status:400,headers});}
+ const fresh=new Map(),errors=[];
+ for(const name of Object.keys(JPE_DEF)){if(!body||!body.files||body.files[name]===undefined)continue;try{for(const s of jpeParse(name,body.files[name]))fresh.set(s.id,s);}catch(e){errors.push(String(e.message||e).slice(0,100));}}
+ if(!fresh.size)return Response.json({error:errors[0]||'No e-Stat files received',errors},{status:422,headers});
+ const nowIso=new Date().toISOString(),series={...((stored&&stored.series)||{})},updated=[];
+ for(const [id,s] of fresh){const old=series[id];if(old&&old.points.length&&old.points[old.points.length-1][0]>s.points[s.points.length-1][0])continue;series[id]={...s,savedAt:nowIso};updated.push(id);}
+ try{await env.BUCKET.put(JPE_KEY,JSON.stringify({updatedAt:nowIso,series}),{httpMetadata:{contentType:'application/json'}});}catch{return Response.json({error:'Could not save the data'},{status:500,headers});}
+ return Response.json({ok:true,series:fresh.size,updated,errors},{headers});
+}
+function jpeView(store,nowMs){
+ const S=(store&&store.series)||{},rows=[];
+ const lag=(p,f)=>{if(f==='M'){const y=Number(p.slice(0,4)),m=Number(p.slice(5,7));return (y-1)+'-'+String(m).padStart(2,'0');}return (Number(p.slice(0,4))-1)+p.slice(4);};
+ const mk=(s,pts)=>{const n=pts.length,l=pts[n-1],pv=pts[n-2],ya=pts.find(p=>p[0]===lag(l[0],s.freq));
+  const ms=s.freq==='M'?Date.UTC(Number(l[0].slice(0,4)),Number(l[0].slice(5,7)),1):Date.UTC(Number(l[0].slice(0,4)),Number(l[0].slice(6,7))*3,1);
+  const age=Math.floor((nowMs-ms)/86400000);
+  return{id:s.id,label:s.label,freq:s.freq==='M'?'Monthly':'Quarterly',unit:s.unit,base:s.base,seasonallyAdjusted:!!s.sa,period:l[0],value:l[1],status:l[2]==='P'?'preliminary':'final',previous:pv?{period:pv[0],value:pv[1]}:null,
+   sequentialPct:s.sa&&pv?Number(((l[1]/pv[1]-1)*100).toFixed(2)):null,yoyPct:ya?Number(((l[1]/ya[1]-1)*100).toFixed(2)):null,ageDays:age,fresh:age<=(s.freq==='M'?100:170)};};
+ for(const id of Object.keys(S)){if(S[id].points&&S[id].points.length>=2)rows.push(mk(S[id],S[id].points));}
+ const e=S.emp,u=S.unemp;
+ if(e&&u){const em=new Map(e.points.map(p=>[p[0],p[1]])),pts=u.points.filter(p=>em.has(p[0])).map(p=>[p[0],p[1]/(p[1]+em.get(p[0]))*100,p[2]]);
+  if(pts.length>=13){const r=mk({id:'unemp_rate',label:'Unemployment rate (derived: unemployed / labour force)',freq:'M',unit:'%',base:null,sa:false},pts);r.value=Number(r.value.toFixed(2));if(r.previous)r.previous.value=Number(r.previous.value.toFixed(2));r.yoyPct=null;const ya=pts.find(p=>p[0]===lag(pts[pts.length-1][0],'M'));r.yoyChangePts=ya?Number((pts[pts.length-1][1]-ya[1]).toFixed(2)):null;rows.push(r);}}
+ return{protocol:'JP-ESTAT-1',updatedAt:(store&&store.updatedAt)||null,series:rows,
+  note:'Official Japan e-Stat (National Summary Data Page) files. Not seasonally adjusted unless marked; year-on-year is the clean comparison. Context only: not scored, not part of any rule version.'};
+}
+const METI_PATH='/api/ice/meti-iip',METI_KEY='ice/manual/meti-iip.xlsx';
+async function metiIipApi(request,env){
+ const headers={'Cache-Control':'no-store'};
+ if(!env.BUCKET)return Response.json({error:'Saved evidence unavailable'},{status:503,headers});
+ let prior=null;try{prior=await env.BUCKET.get(METI_KEY);}catch{prior=null;}
+ const pm=(prior&&prior.customMetadata)||{};
+ if(request.method==='GET')return Response.json({stored:!!prior,period:pm.period||null,uploadedAt:pm.uploadedAt||null},{headers});
+ if(request.method!=='POST')return Response.json({error:'Use GET or POST'},{status:405,headers});
+ let buf;try{buf=await request.arrayBuffer();}catch{return Response.json({error:'Could not read the file'},{status:400,headers});}
+ if(buf.byteLength<500||buf.byteLength>800000||new Uint8Array(buf)[0]!==0x50||new Uint8Array(buf)[1]!==0x4b)return Response.json({error:'Not a METI Excel file'},{status:400,headers});
+ let pts;try{pts=(await mfgParseMeti(buf)).points;}catch(e){return Response.json({error:String(e&&e.message||e).slice(0,120)},{status:422,headers});}
+ const last=pts[pts.length-1];
+ if(pts.length<24||!last||!(last.v>20&&last.v<300))return Response.json({error:'METI file failed validation'},{status:422,headers});
+ if(pm.period&&pm.period>last.d)return Response.json({error:'Older than the saved copy ('+pm.period+')'},{status:409,headers});
+ const uploadedAt=new Date().toISOString();
+ try{await env.BUCKET.put(METI_KEY,buf,{httpMetadata:{contentType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'},customMetadata:{uploadedAt,period:last.d}});}catch{return Response.json({error:'Could not save the file'},{status:500,headers});}
+ try{await mfgBuild(env);}catch{/* the scheduled run will pick it up */}
+ return Response.json({ok:true,points:pts.length,period:last.d,value:last.v,changed:pm.period!==last.d},{headers});
+}
 function diWeekendClose(iso){const t=Date.parse(iso);if(!Number.isFinite(t))return false;const d=new Date(t),w=d.getUTCDay(),h=d.getUTCHours();return w===6||(w===0&&h<23)||(w===5&&h>=20);}
 function diBrokerMove(group,frame,now){
   if(!group)return {ok:false,reason:'Broker contract unavailable'};
@@ -15447,8 +15563,8 @@ const MFG_SOURCES=[
  {ccy:'CAD',name:'Canada',measure:'Manufacturing real GDP (chained 2017 CAD, SAAR)',source:'https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3610043401',run:async()=>mfgParseStatcan(await(await mfgGet('https://www150.statcan.gc.ca/t1/wds/rest/getDataFromCubePidCoordAndLatestNPeriods',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify([{productId:36100434,coordinate:'1.1.1.54.0.0.0.0.0.0',latestN:40}])})).json())}
  ,{ccy:'NOK',name:'Norway',measure:'Manufacturing production index (2021=100, SA)',source:'https://www.ssb.no/en/statbank/table/07095',run:async()=>mfgParseSsb(await(await mfgGet('https://data.ssb.no/api/v0/en/table/07095',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:[{code:'PKoder',selection:{filter:'item',values:['P105']}},{code:'ContentsCode',selection:{filter:'item',values:['Sesongjustert']}},{code:'Tid',selection:{filter:'top',values:['40']}}],response:{format:'json-stat2'}})})).json())},
  {ccy:'SEK',name:'Sweden',measure:'Manufacturing production index (2021=100, calendar and seasonally adjusted)',source:'https://www.scb.se/en/finding-statistics/statistics-by-subject-area/economic-trends-and-forecasts/industrial-production-and-business-activity/industrial-production-index/',run:async()=>mfgParseScb(await(await mfgGet('https://api.scb.se/OV0104/v1/doris/en/ssd/NV/NV0402/NV0402A/IPI2010KedjM',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:[{code:'SNI2007',selection:{filter:'item',values:['C']}},{code:'ContentsCode',selection:{filter:'item',values:['NV0402AL']}},{code:'Tid',selection:{filter:'top',values:['40']}}],response:{format:'json'}})})).json())}
- ,{ccy:'JPY',name:'Japan',measure:'Manufacturing production index (2020=100, SA)',source:'https://www.meti.go.jp/english/statistics/tyo/iip/b2020_result-2.html',run:async()=>mfgParseMeti(await(await mfgGet('https://www.meti.go.jp/english/statistics/tyo/iip/xls/b2020_gsm1e.xlsx')).arrayBuffer())}
- ,{ccy:'CHF',name:'Switzerland',measure:'Manufacturing production index (2021=100, SA)',source:'https://www.pxweb-admin-a.bfs.admin.ch/pxweb/en/px-x-0603010000_101/-/px-x-0603010000_101.px/',run:async()=>mfgParseBfs(await(await mfgGet('https://www.pxweb-admin-a.bfs.admin.ch/api/v1/en/px-x-0603010000_101/px-x-0603010000_101.px',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:[{code:'Bereinigung',selection:{filter:'item',values:['sa']}},{code:'Indizes / Ver\u00e4nderungsraten',selection:{filter:'item',values:['ind']}},{code:'Variable',selection:{filter:'item',values:['ptot']}},{code:'Branche',selection:{filter:'item',values:['C']}},{code:'Monat',selection:{filter:'top',values:['40']}}],response:{format:'json'}})})).json())},
+ ,{ccy:'JPY',name:'Japan',measure:'Manufacturing production index (2020=100, SA)',source:'https://www.meti.go.jp/english/statistics/tyo/iip/b2020_result-2.html',run:async()=>mfgParseMeti(await(await mfgGet('https://www.meti.go.jp/english/statistics/tyo/iip/xls/b2020_gsm1e.xlsx')).arrayBuffer()),fallback:async env=>{const o=await env.BUCKET.get(METI_KEY);if(!o)throw Error('no uploaded copy');const r=await mfgParseMeti(await o.arrayBuffer());return{...r,fallbackNote:'METI blocks automatic download; showing the copy uploaded on '+String((o.customMetadata||{}).uploadedAt||'').slice(0,10)+'.'};}}
+ ,{ccy:'CHF',manual:async env=>{const o=await env.BUCKET.get(BFS_KEY);if(!o)return null;const r=await mfgParseBfsXlsx(await o.arrayBuffer());return{...r,manualNote:'FSO monthly industry table (seasonally adjusted), uploaded '+String((o.customMetadata||{}).uploadedAt||'').slice(0,10)+'; the old automatic table stops at December 2025.'};},name:'Switzerland',measure:'Manufacturing production index (2021=100, SA)',source:'https://www.pxweb-admin-a.bfs.admin.ch/pxweb/en/px-x-0603010000_101/-/px-x-0603010000_101.px/',run:async()=>mfgParseBfs(await(await mfgGet('https://www.pxweb-admin-a.bfs.admin.ch/api/v1/en/px-x-0603010000_101/px-x-0603010000_101.px',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:[{code:'Bereinigung',selection:{filter:'item',values:['sa']}},{code:'Indizes / Ver\u00e4nderungsraten',selection:{filter:'item',values:['ind']}},{code:'Variable',selection:{filter:'item',values:['ptot']}},{code:'Branche',selection:{filter:'item',values:['C']}},{code:'Monat',selection:{filter:'top',values:['40']}}],response:{format:'json'}})})).json())},
  {ccy:'AUD',name:'Australia',measure:'Manufacturing turnover (ABS Monthly Business Turnover, discontinued)',source:'https://data.api.abs.gov.au/rest/data/ABS,BUSINESS_TURNOVER,1.3.0/M1.CUR.20.C.AUS.M',run:async()=>mfgParseAbs(await(await mfgGet('https://data.api.abs.gov.au/rest/data/ABS,BUSINESS_TURNOVER,1.3.0/M1.CUR.20.C.AUS.M?lastNObservations=40&format=jsondata',{headers:{Accept:'application/vnd.sdmx.data+json'}})).json())}
 ];
 function mfgStats(points){
@@ -15467,7 +15583,7 @@ function mfgStats(points){
 const MFG_META={
  USD:{frequency:'Monthly',unit:'Index, 2017=100',maxAge:80},EUR:{frequency:'Monthly',unit:'Index, 2021=100',maxAge:85},GBP:{frequency:'Monthly',unit:'Index, 2022=100',maxAge:85},
  CAD:{frequency:'Monthly',unit:'Millions CAD, chained 2017, SAAR',maxAge:100},NOK:{frequency:'Monthly',unit:'Index, 2021=100',maxAge:80},SEK:{frequency:'Monthly',unit:'Index, 2021=100',maxAge:80},
- JPY:{frequency:'Monthly',unit:'Index, 2020=100',maxAge:80},CHF:{frequency:'Monthly',unit:'Index, 2021=100',maxAge:100,note:'Swiss statistics office monthly table; its latest published month is December 2025.'},
+ JPY:{frequency:'Monthly',unit:'Index, 2020=100',maxAge:80},CHF:{frequency:'Monthly',unit:'Index, 2021=100',maxAge:100,note:'Swiss statistics office; the automatic table stops at December 2025, so current data comes from the uploaded monthly industry file.'},
  AUD:{frequency:'Monthly',unit:'Index, current prices',maxAge:100,discontinued:true,note:'ABS Monthly Business Turnover Indicator is discontinued; historical only.'}
 };
 function mfgParseBfs(j){
@@ -15503,7 +15619,7 @@ async function mfgBuild(env){
  const rows=await Promise.all(MFG_SOURCES.map(async s=>{
   const meta=MFG_META[s.ccy]||{},base={ccy:s.ccy,name:s.name,measure:s.measure,source:s.source,kind:'hard',frequency:meta.frequency||'Monthly',unit:meta.unit||null,validation:'passed'};
   let r=null,err=null,viaFallback=null;
-  try{r=await s.run();}catch(e){err=String(e&&e.message||e).slice(0,120);if(s.fallback&&env&&env.BUCKET)try{r=await s.fallback(env);viaFallback='Live source refused the request ('+err.slice(0,40)+'); showing the copy saved by the scheduled run.';}catch{}}
+  try{r=(s.manual&&env&&env.BUCKET&&await s.manual(env).catch(()=>null))||await s.run();if(r&&r.manualNote)viaFallback=r.manualNote;}catch(e){err=String(e&&e.message||e).slice(0,120);if(s.fallback&&env&&env.BUCKET)try{r=await s.fallback(env);viaFallback=r.fallbackNote||'Live source refused the request ('+err.slice(0,40)+'); showing the copy saved by the scheduled run.';}catch{}}
   const prev=store[s.ccy]||null;
   if(r&&r.points&&r.points.length>=3){
    const st=mfgStats(r.points),m=mfgMerge(prev,r.points,nowIso,s.source),age=mfgAgeDays(st.period,nowMs);
@@ -16261,6 +16377,9 @@ const WRITER_SCOPES=new Map([
   [OIS_PATH,['COLLECTOR']],
   [MANUAL_PATH,['COLLECTOR']],
   [MQL_PATH,['COLLECTOR']],
+  [METI_PATH,['COLLECTOR']],
+  [JPE_PATH,['COLLECTOR']],
+  [BFS_PATH,['COLLECTOR']],
   ['/api/ice/import',['COLLECTOR']],
   ['/api/ice/refresh',['OPERATOR','COLLECTOR']],
   ['/api/ice/funding',['OPERATOR','COLLECTOR']],
@@ -16297,7 +16416,7 @@ async function guardWriter(request,url,env){
   if(!roles||(url.pathname===LAB_ARCHIVE_PATH&&!read)||(!read&&request.method!=='POST'))return reject('Unsupported API write operation',405);
   if(request.headers.has('Origin')&&request.headers.get('Origin')!==url.origin)
     return reject('Cross-origin request rejected',403);
-  const servicePaths=new Set([WEEKLY_RECEIPT_PATH,DAILY_HISTORY_PATH,OIS_PATH,MANUAL_PATH,MQL_PATH,'/api/broker/ingest','/api/broker/ticks','/api/ice/attempt','/api/ice/import','/api/ice/refresh','/api/top-markets/refresh']);
+  const servicePaths=new Set([WEEKLY_RECEIPT_PATH,DAILY_HISTORY_PATH,OIS_PATH,MANUAL_PATH,MQL_PATH,METI_PATH,JPE_PATH,BFS_PATH,'/api/broker/ingest','/api/broker/ticks','/api/ice/attempt','/api/ice/import','/api/ice/refresh','/api/top-markets/refresh']);
   const serviceToken=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get('OAI-Sites-Authorization')||request.headers.get('X-Macro-ICE-Service')||'')?.[1];
   if(((staged||(!read&&servicePaths.has(url.pathname)))||(read&&url.pathname===LAB_ARCHIVE_PATH))&&serviceToken&&env.MACRO_ICE_SERVICE_TOKEN&&await writerTokenMatches(serviceToken,env.MACRO_ICE_SERVICE_TOKEN))return null;
   const keys=roles.map(role=>env['MACRO_ICE_'+role+'_TOKEN']).filter(key=>typeof key==='string'&&WRITER_TOKEN.test(key));
