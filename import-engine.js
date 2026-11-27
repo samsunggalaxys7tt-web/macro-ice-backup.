@@ -15070,6 +15070,7 @@ function ice97Marker(){return 1;}
 function ice98Marker(){return 1;}
 function ice99Marker(){return 1;}
 function ice100Marker(){return 1;}
+function ice101Marker(){return 1;}
 // Batch 98: read-only data pipeline audit. GET /api/ice/audit lists every input that arrives from your PC, a manual file, an operator entry or the saved code,
 // with when it last updated and whether that is on time. It reads storage metadata only and changes nothing.
 const AUDIT_PATH='/api/ice/audit';
@@ -15133,6 +15134,7 @@ const FIELD_AUDIT_RULES=[
  [/^calendar\.events\[\]\.actual$/,'Event not yet released'],
  [/^calendar\.events\[\]\.forecast$/,'No consensus forecast published for this event'],
  [/^calendar\.events\[\]\.previous$/,'No prior value published for this event'],
+ [/^indicatorEvidence\[\]\.expectedPeriodReason$/,'Not needed: this row already has an expected period'],
  [/^indicatorEvidence\[\]\.expectedPeriod$/,'Annual, event-driven or unscheduled series with no fixed expected period (see expectedPeriodReason)'],
  [/^indicatorEvidence\[\]\.(expectedReleaseAt|nextReleaseDate)$/,'Publisher has not announced the next release date'],
  [/^indicatorEvidence\[\]\.(publishedAt|publishedDate)$/,'Publisher supplies no release timestamp for this series; retrievedAt is the verified time'],
