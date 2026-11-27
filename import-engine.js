@@ -11125,11 +11125,12 @@ function governanceEvidence(record, registry, now = Date.now(), officialReleases
   }
   return rows.map(row => ({
     ...row,
-    freshnessReason:row.freshnessReason??(row.freshness==='Current'?null:
+    freshnessReason:row.freshnessReason??(row.freshness==='Current'?'Verified release: latest period '+row.period+(row.publishedAt?', published '+String(row.publishedAt).slice(0,10):'')+(row.nextReleaseDate?'; next release '+row.nextReleaseDate:'')+'.':
       row.freshness==='Superseded'?'Period lagging: saved '+row.period+'; released '+row.latestVerifiedPeriod:
       'Schedule missing: '+(ICE_RELEASE_SCHEDULE_REASONS[row.ccy+'/'+row.feedId]||
         'Exact series publication and next release schedule not verified')+
         (row.scheduleSource?' Official calendar: '+row.scheduleSource:'')),
+    expectedPeriodReason:row.expectedPeriod?null:(['Current','Current - date-level','Confirmed unchanged'].includes(row.freshness)?'Not applicable: the verified release calendar already confirms this period':row.freshness==='Cadence checked'?'Not applicable: annual or irregular series with no fixed expected period':row.freshness==='Unavailable'?'No usable observation, so no period to expect':'Not set: no verified release schedule for this series'),
     peerPeriods:[...new Set(rows.filter(other => other.ccy !== row.ccy
       && other.indicator === row.indicator && other.frequency === row.frequency
       && other.period).map(other => other.period))].sort().reverse()
@@ -13874,6 +13875,7 @@ async function iceApi(request,env){const url=new URL(request.url);try{
  if(url.pathname===S15_PATH)return shadow15Api(request,env);
  if(url.pathname===EXPORT_PATH)return exportApi(request,env);
  if(url.pathname===AUDIT_PATH)return auditApi(request,env);
+ if(url.pathname===FIELD_AUDIT_PATH)return fieldAuditApi(request,env);
  if(url.pathname==='/api/ice/storage-prune')return storagePruneApi(request,env);
  if(url.pathname==='/api/ice/batch3')return batch3Api(request,env);
  if(url.pathname==='/api/ice/batch2b')return batch2bApi(request,env);
@@ -14330,7 +14332,7 @@ async function coverageApi(request,env){
 async function fundingApi(request,env){
  if(!env.BUCKET)return Response.json({error:'Persistent source storage unavailable'},{status:503});
  const headers={'Cache-Control':'no-store'},url=new URL(request.url),old=await iceRead(env.BUCKET,'funding/latest.json');
- if(request.method==='GET')return Response.json({runId:old?.runId||null,capturedAt:old?.bundle?.capturedAt||null,fixings:buildOvernightView(old?.bundle),scoringUnchanged:true},{headers});
+ if(request.method==='GET'){const core=await iceRead(env.BUCKET,'ice/latest.json'),merged=mergeOvernightEvidence(core?.bundle,old?.bundle);return Response.json({runId:old?.runId||null,capturedAt:merged?.capturedAt||old?.bundle?.capturedAt||null,standaloneCapturedAt:old?.bundle?.capturedAt||null,fixings:buildOvernightView(merged),note:'Newest of the standalone funding capture and the main collection.',scoringUnchanged:true},{headers});}
  if(request.method!=='POST'||!request.headers.get('content-type')?.startsWith('application/json'))return Response.json({error:'Use JSON POST'},{status:405});
  if(request.headers.get('origin')&&request.headers.get('origin')!==url.origin)return Response.json({error:'Cross-origin write rejected'},{status:403});
  const raw=await request.text();if(raw.length>200000)return Response.json({error:'Funding capture too large'},{status:413});
@@ -15067,6 +15069,7 @@ function ice96Marker(){return 1;}
 function ice97Marker(){return 1;}
 function ice98Marker(){return 1;}
 function ice99Marker(){return 1;}
+function ice100Marker(){return 1;}
 // Batch 98: read-only data pipeline audit. GET /api/ice/audit lists every input that arrives from your PC, a manual file, an operator entry or the saved code,
 // with when it last updated and whether that is on time. It reads storage metadata only and changes nothing.
 const AUDIT_PATH='/api/ice/audit';
@@ -15094,7 +15097,8 @@ async function auditApi(request,env){
   let updatedAt=null,note='';
   try{
    if(id==='liquidity'){updatedAt=await g10LiquidityStamp(env);}
-   else{const h=await env.BUCKET.head(keyFn());if(h&&h.uploaded)updatedAt=new Date(h.uploaded).toISOString();}
+   else{const h=await env.BUCKET.head(keyFn());if(h&&h.uploaded)updatedAt=new Date(h.uploaded).toISOString();
+    if(id==='history'){const fc=await iceRead(env.BUCKET,'ops/trading-full.json'),ft=Date.parse(fc?.checkedAt);if(Number.isFinite(ft)&&ft<=now&&(!updatedAt||ft>Date.parse(updatedAt))){updatedAt=new Date(ft).toISOString();note='Latest of the daily receipt and the full-check receipt';}}}
   }catch{note='Could not read';}
   const t=updatedAt?Date.parse(updatedAt):NaN,ageH=Number.isFinite(t)?Math.max(0,Math.round((now-t)/36e5*10)/10):null;
   rows.push({id,label,how,usedBy,updatedAt,ageHours:ageH,status:auditStatus(ageH,late,stale),lateAfterHours:late,staleAfterHours:stale,note});
@@ -15111,6 +15115,56 @@ async function auditApi(request,env){
  const summary={current:0,late:0,stale:0,missing:0};
  for(const r of rows){if(r.status==='Current')summary.current++;else if(r.status==='Late')summary.late++;else if(r.status==='Stale')summary.stale++;else if(r.status==='No data')summary.missing++;}
  return Response.json({generatedAt:new Date(now).toISOString(),rows,summary},{headers});
+}
+
+// Batch 100: read-only field audit. GET /api/ice/field-audit lists every empty (null) field in the live assessment payload with the reason it is legitimately empty.
+// A field with no registered reason is returned as UNEXPLAINED so it can be fixed. Reads only; changes nothing.
+const FIELD_AUDIT_PATH='/api/ice/field-audit';
+const FIELD_AUDIT_RULES=[
+ [/^analysis\.assets\[\]\.features\[\]\.(observation|source)$/,'Feature input not available this period; the feature is shown unscored'],
+ [/^analysis\.attribution\[\]\.periods\[\]\.(asOf|change)$/,'Look-back window is longer than the saved history; fills as daily history accumulates'],
+ [/^analysis\.iceTrend\[\]\.(acceleration|fourWeeks\.(asOf|change)|twelveWeeks\.(asOf|change))$/,'Look-back window is longer than the saved history; fills as daily history accumulates'],
+ [/^analysis\.economies\[\]\.crowding$/,'No crowding flag: leveraged-fund net/OI is within the 30% band, or the positioning input is not current'],
+ [/^analysis\.economies\[\]\.factors\.[a-zA-Z]+\.score$/,'Factor unscored: no usable feature inputs this period'],
+ [/^analysis\.economies\[\]\.factors\.[a-zA-Z]+\.features\[\]\.(score|observation|source|proxy|yoy|observation\.status)$/,'Feature unscored or not applicable: input unconnected, no proxy needed, or the series carries no status'],
+ [/^analysis\.economies\[\]\.observations\.[a-zA-Z]+\.status$/,'Series reports no status flag'],
+ [/^analysis\.economies\[\]\.confidenceBreakdown\.validation$/,'No validation adjustment applies'],
+ [/^analysis\.(economies\[\]\.policyValidation|inputValidation\.checks\[\])\.(manualConfirmation|officialDateKind)$/,'Not applicable: no manual confirmation or official date type is needed for this check'],
+ [/^calendar\.events\[\]\.actual$/,'Event not yet released'],
+ [/^calendar\.events\[\]\.forecast$/,'No consensus forecast published for this event'],
+ [/^calendar\.events\[\]\.previous$/,'No prior value published for this event'],
+ [/^indicatorEvidence\[\]\.expectedPeriod$/,'Annual, event-driven or unscheduled series with no fixed expected period (see expectedPeriodReason)'],
+ [/^indicatorEvidence\[\]\.(expectedReleaseAt|nextReleaseDate)$/,'Publisher has not announced the next release date'],
+ [/^indicatorEvidence\[\]\.(publishedAt|publishedDate)$/,'Publisher supplies no release timestamp for this series; retrievedAt is the verified time'],
+ [/^indicatorEvidence\[\]\.vintage$/,'Not tracked per indicator row; first-release vintages are shown in the vintage panel'],
+ [/^indicatorEvidence\[\]\.latestVerifiedPeriod$/,'Latest period not verified against an official release (schedule unverified or series unavailable)'],
+ [/^indicatorEvidence\[\]\.period$/,'Series returned no usable observation'],
+ [/^indicatorEvidence\[\]\.primaryError$/,'No primary-source error recorded'],
+ [/^indicatorEvidence\[\]\.scheduleSource$/,'No official calendar source identified for this series'],
+ [/^sourceEvidence\.\*\.sourceUpdatedAt$/,'Publisher supplies no update timestamp; retrievedAt is the verified time'],
+ [/^sourceEvidence\.\*\.releaseDate$/,'Publisher supplies no release date for this feed']
+];
+function fieldAuditPath(p){return p.replace(/^sourceEvidence\.[^.]+\./,'sourceEvidence.*.');}
+function fieldAuditCollect(v,p,d,m){
+ if(d>12)return;
+ if(v===null||v===''){m.set(p,(m.get(p)||0)+1);return;}
+ if(Array.isArray(v)){for(const x of v)fieldAuditCollect(x,p+'[]',d+1,m);return;}
+ if(v&&typeof v==='object'){for(const k of Object.keys(v))fieldAuditCollect(v[k],p?p+'.'+k:k,d+1,m);}
+}
+function fieldAuditReport(L){
+ const m=new Map();fieldAuditCollect(L,'',0,m);
+ const agg=new Map();
+ for(const[p,n]of m){const q=fieldAuditPath(p);agg.set(q,(agg.get(q)||0)+n);}
+ const fields=[...agg.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([path,count])=>{const r=FIELD_AUDIT_RULES.find(x=>x[0].test(path));return{path,count,reason:r?r[1]:null,status:r?'Explained':'UNEXPLAINED'};});
+ const unexplained=fields.filter(f=>f.status==='UNEXPLAINED');
+ return{fields,summary:{emptyFieldPaths:fields.length,emptyValues:fields.reduce((s,f)=>s+f.count,0),explained:fields.length-unexplained.length,unexplained:unexplained.length}};
+}
+async function fieldAuditApi(request,env){
+ const headers={'Cache-Control':'no-store'};
+ if(request.method!=='GET')return Response.json({error:'Use GET'},{status:405,headers});
+ if(!env.BUCKET)return Response.json({error:'Saved evidence unavailable'},{status:503,headers});
+ let L;try{const r=await iceApi(new Request(new URL('/api/ice/latest',request.url)),env);if(!r.ok)throw Error('x');L=await r.json();}catch{return Response.json({error:'Latest assessment unavailable'},{status:503,headers});}
+ return Response.json({generatedAt:new Date().toISOString(),...fieldAuditReport(L)},{headers});
 }
 
 // Batch 97: read-only storage export for the PC backup. GET /api/ice/export lists or reads saved objects (service credential required).
