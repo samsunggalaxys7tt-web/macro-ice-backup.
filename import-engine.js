@@ -15459,6 +15459,7 @@ function ice111Marker(){return 1;}
 function ice112Marker(){return 1;}
 function ice113Marker(){return 1;}
 function ice114Marker(){return 1;}
+function ice115Marker(){return 1;}
 // Batch 98: read-only data pipeline audit. GET /api/ice/audit lists every input that arrives from your PC, a manual file, an operator entry or the saved code,
 // with when it last updated and whether that is on time. It reads storage metadata only and changes nothing.
 const AUDIT_PATH='/api/ice/audit';
@@ -15841,6 +15842,25 @@ function s15Record(log,fx,now){
  for(const k of keys)for(const t of['moderate','strong']){const s=stats[k][t];s.avgPct=s.n?Number((s.sum/s.n).toFixed(3)):null;s.hitPct=s.n?Number((100*s.wins/s.n).toFixed(1)):null;delete s.sum;}
  return{daysLogged:days,since:oldest,horizonDays:S15_HORIZON_DAYS,stats};
 }
+// Batch 115: UK M4 and NZ broad money growth for the ICE-RULES-1.5 shadow liquidity score. Shadow only; existing sources win over these.
+function s15MoneyYoy(points,now,maxAgeDays){
+ const rows=(Array.isArray(points)?points:[]).map(p=>[String((p&&(p.d||p.date))||'').slice(0,10),Number(p&&(p.v!==undefined?p.v:p.value))]).filter(r=>/^\d{4}-\d{2}-\d{2}$/.test(r[0])&&Number.isFinite(r[1])&&r[1]>0&&Date.parse(r[0])<=now).sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
+ const last=rows[rows.length-1];if(!last||now-Date.parse(last[0])>maxAgeDays*864e5)return null;
+ const t=Date.parse(last[0])-365*864e5,prev=rows.reduce((b,r)=>Math.abs(Date.parse(r[0])-t)<Math.abs(Date.parse(b[0])-t)?r:b,rows[0]);
+ if(Math.abs(Date.parse(prev[0])-t)>45*864e5)return null;
+ const yoy=(last[1]/prev[1]-1)*100;
+ return Number.isFinite(yoy)&&Math.abs(yoy)<60?{period:last[0],yoy}:null;
+}
+async function s15MoneyExtra(env,record,now){
+ const out={},notes=[];
+ try{const f=record&&record.bundle&&record.bundle.feeds&&record.bundle.feeds.boe_m4,r=s15MoneyYoy(f&&f.points,now,120);
+  if(r){out.GBP=r;notes.push({source:'UK M4 growth (GBP)',ok:true});}else notes.push({source:'UK M4 growth (GBP)',ok:false,error:'no current value'});
+ }catch{notes.push({source:'UK M4 growth (GBP)',ok:false,error:'unreadable'});}
+ try{const m=await iceRead(env.BUCKET,MANUAL_KEY),f=m&&m.feeds&&m.feeds.nzd_broad_money,r=s15MoneyYoy(f&&f.rows,now,150);
+  if(r){out.NZD=r;notes.push({source:'RBNZ broad money growth (NZD)',ok:true});}else notes.push({source:'RBNZ broad money growth (NZD)',ok:false,error:'no current value'});
+ }catch{notes.push({source:'RBNZ broad money growth (NZD)',ok:false,error:'unreadable'});}
+ return{out,notes};
+}
 async function shadow15Api(request,env){
  const headers={'Cache-Control':'no-store'};
  if(request.method!=='GET')return Response.json({error:'Use GET'},{status:405,headers});
@@ -15856,7 +15876,8 @@ async function shadow15Api(request,env){
   const[deskRes,bsRes,dirRes,inputs]=await Promise.all([macroDeskApi(sub('/api/ice/desk'),env),cbBalanceApi(sub('/api/ice/cb-balance-sheet'),env),directionIntelligenceApi(sub('/api/ice/direction-intelligence?frame=1H&broker=HFM'),env),s15Inputs(env,force)]);
   if(!deskRes.ok||!bsRes.ok||!dirRes.ok)return Response.json({error:'Could not read the saved evidence the shadow needs',desk:deskRes.status,balanceSheets:bsRes.status,direction:dirRes.status},{status:502,headers});
   const[desk,bs,dir]=await Promise.all([deskRes.json(),bsRes.json(),dirRes.json()]);
-  const cmp=s15Compare(analysis,desk,bs.rows||[],dir.rows||[],inputs,now),fx=record&&record.bundle&&record.bundle.feeds&&record.bundle.feeds.fx;
+  const extra=await s15MoneyExtra(env,record,now),inputs2={...inputs,money:{...extra.out,...(inputs.money||{})},notes:[...(inputs.notes||[]),...extra.notes]};
+  const cmp=s15Compare(analysis,desk,bs.rows||[],dir.rows||[],inputs2,now),fx=record&&record.bundle&&record.bundle.feeds&&record.bundle.feeds.fx;
   let log=[];try{const o=await env.BUCKET.get(S15_LOG_KEY);if(o){const j=await o.json();if(Array.isArray(j))log=j;}}catch{log=[];}
   const today=nowIso.slice(0,10);
   if(dir.macroCurrent&&!log.some(e=>e.d===today)){
@@ -15865,7 +15886,7 @@ async function shadow15Api(request,env){
   }
   const out={version:1,generatedAt:nowIso,note:'Shadow of the proposed ICE-RULES-1.5. It is not used by any rank, light, alert or Lab forecast. ICE-RULES-1.4 stays the active rule set.',
    rules:{weights:S15_W15,extendedWeights:S15_WX,tiers:S15_TIERS,variants:S15_VARIANTS.map(v=>({id:v[0],label:v[1]}))},
-   macroCapturedAt:analysis.capturedAt||null,macroCurrent:!!dir.macroCurrent,inputs:inputs.notes,...cmp,record:s15Record(log,fx,now)};
+   macroCapturedAt:analysis.capturedAt||null,macroCurrent:!!dir.macroCurrent,inputs:inputs2.notes,...cmp,record:s15Record(log,fx,now)};
   try{await env.BUCKET.put(S15_CACHE_KEY,JSON.stringify(out),{httpMetadata:{contentType:'application/json'}});}catch{/* optional */}
   return Response.json({...out,cached:false},{headers});
  }catch(e){return Response.json({error:'Shadow calculation failed: '+String(e&&e.message||e).slice(0,120)},{status:502,headers});}
