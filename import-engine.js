@@ -15489,6 +15489,7 @@ function ice112Marker(){return 1;}
 function ice113Marker(){return 1;}
 function ice114Marker(){return 1;}
 function ice116Marker(){return 1;}
+function ice117Marker(){return 1;}
 function ice115Marker(){return 1;}
 // Batch 98: read-only data pipeline audit. GET /api/ice/audit lists every input that arrives from your PC, a manual file, an operator entry or the saved code,
 // with when it last updated and whether that is on time. It reads storage metadata only and changes nothing.
@@ -15742,6 +15743,7 @@ function s15Score(econ,ctx,sign,ext){
   else over.rates=o?{score:0.7*rt.score+0.3*o.score,coverage:100}:{score:rt.score,coverage:70};
  }
  const lq=s15Liq(econ,ctx.bs,sign,ctx.credit,ctx.money);if(lq)over.liquidity=lq;
+ const gq=ctx.gdpm&&ctx.gdpm[econ.ccy];if(gq&&Number.isFinite(gq.qq))over.growth={score:s15Clip(50+20*gq.qq),coverage:100};
  if(ext){const e=ctx.eer[econ.ccy];if(e){over.valuation={score:e.valuation,coverage:100};over.momentum={score:e.momentum,coverage:100};}}
  return s15Blend(econ,ext?S15_WX:S15_W15,over);
 }
@@ -15812,7 +15814,7 @@ async function s15Inputs(env,force){
 function s15Compare(latest,desk,bsRows,dirRows,inputs,now){
  const econs=latest.economies||[],bs=Object.fromEntries((bsRows||[]).filter(r=>r.status==='ok').map(r=>[r.ccy,r]));
  const policy=s15Policy(desk),ois=s15Ois(desk,policy),y2=s15Y2(desk);
- const ctx={ois,y2,bs,credit:inputs.credit,money:inputs.money,eer:inputs.eer};
+ const ctx={ois,y2,bs,credit:inputs.credit,money:inputs.money,gdpm:inputs.gdpm,eer:inputs.eer};
  const sets={v14:Object.fromEntries(econs.map(e=>[e.ccy,e.score]))};
  for(const[k,,sign,ext]of S15_VARIANTS)sets[k]=Object.fromEntries(econs.map(e=>[e.ccy,s15Score(e,ctx,sign,ext)]));
  const rank=S=>Object.keys(S).filter(c=>S[c]!=null).sort((a,b)=>S[b]-S[a]);
@@ -15891,6 +15893,23 @@ async function s15MoneyExtra(env,record,now){
  }catch{notes.push({source:'RBNZ broad money growth (NZD)',ok:false,error:'unreadable'});}
  return{out,notes};
 }
+// Batch 117: Canada monthly real GDP for the ICE-RULES-1.5 shadow growth pillar. Shadow only; used only when the stored feed is current.
+function s15GdpQq(rowsIn,now,maxAgeDays){
+ const rows=(Array.isArray(rowsIn)?rowsIn:[]).map(p=>[String((p&&(p.d||p.date))||'').slice(0,10),Number(p&&(p.v!==undefined?p.v:p.value))]).filter(r=>/^\d{4}-\d{2}-\d{2}$/.test(r[0])&&Number.isFinite(r[1])&&r[1]>0&&Date.parse(r[0])<=now).sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
+ if(rows.length<6)return null;
+ const last6=rows.slice(-6),mi=d=>Number(d.slice(0,4))*12+Number(d.slice(5,7));
+ for(let i=1;i<6;i++)if(mi(last6[i][0])-mi(last6[i-1][0])!==1)return null;
+ const last=last6[5];if(now-Date.parse(last[0])>maxAgeDays*864e5)return null;
+ const cur=(last6[3][1]+last6[4][1]+last6[5][1])/3,prev=(last6[0][1]+last6[1][1]+last6[2][1])/3,qq=(cur/prev-1)*100;
+ return Number.isFinite(qq)&&Math.abs(qq)<10?{period:last[0],qq}:null;
+}
+async function s15GdpExtra(env,now){
+ const out={},notes=[];
+ try{const m=await iceRead(env.BUCKET,MANUAL_KEY),f=m&&m.feeds&&m.feeds.gdp_cad,r=s15GdpQq(f&&f.rows,now,135);
+  if(r){out.CAD=r;notes.push({source:'Canada monthly real GDP (CAD)',ok:true});}else notes.push({source:'Canada monthly real GDP (CAD)',ok:false,error:'no current value'});
+ }catch{notes.push({source:'Canada monthly real GDP (CAD)',ok:false,error:'unreadable'});}
+ return{out,notes};
+}
 async function shadow15Api(request,env){
  const headers={'Cache-Control':'no-store'};
  if(request.method!=='GET')return Response.json({error:'Use GET'},{status:405,headers});
@@ -15906,7 +15925,7 @@ async function shadow15Api(request,env){
   const[deskRes,bsRes,dirRes,inputs]=await Promise.all([macroDeskApi(sub('/api/ice/desk'),env),cbBalanceApi(sub('/api/ice/cb-balance-sheet'),env),directionIntelligenceApi(sub('/api/ice/direction-intelligence?frame=1H&broker=HFM'),env),s15Inputs(env,force)]);
   if(!deskRes.ok||!bsRes.ok||!dirRes.ok)return Response.json({error:'Could not read the saved evidence the shadow needs',desk:deskRes.status,balanceSheets:bsRes.status,direction:dirRes.status},{status:502,headers});
   const[desk,bs,dir]=await Promise.all([deskRes.json(),bsRes.json(),dirRes.json()]);
-  const extra=await s15MoneyExtra(env,record,now),inputs2={...inputs,money:{...extra.out,...(inputs.money||{})},notes:[...(inputs.notes||[]),...extra.notes]};
+  const extra=await s15MoneyExtra(env,record,now),gdpx=await s15GdpExtra(env,now),inputs2={...inputs,money:{...extra.out,...(inputs.money||{})},gdpm:gdpx.out,notes:[...(inputs.notes||[]),...extra.notes,...gdpx.notes]};
   const cmp=s15Compare(analysis,desk,bs.rows||[],dir.rows||[],inputs2,now),fx=record&&record.bundle&&record.bundle.feeds&&record.bundle.feeds.fx;
   let log=[];try{const o=await env.BUCKET.get(S15_LOG_KEY);if(o){const j=await o.json();if(Array.isArray(j))log=j;}}catch{log=[];}
   const today=nowIso.slice(0,10);
